@@ -2,8 +2,8 @@ package go_request
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/tls"
-	"encoding/base64"
 	"fmt"
 	"io"
 	"net"
@@ -12,7 +12,6 @@ import (
 	"os"
 	"regexp"
 	"strings"
-	"time"
 )
 
 type RWC interface { // mean Reader Writer Close
@@ -39,7 +38,6 @@ type Request struct {
 	Complete    func(res *Response)         // if request is complete then callback the function.
 	Error       func(err error)             // when the request occur error then invoke the function.
 	StatusCode  map[int]func(res *Response) // according to response status code to callback specific function.
-	BeforeSend  func(request *Request)      // before send the request invoke the function.
 
 	link          *url.URL // parsed url
 	connection    RWC      // connection
@@ -52,6 +50,7 @@ func (this *Request) defaultParams() {
 	this.checkHeaders()
 	this.checkTimeout()
 	this.checkContentType()
+	this.checkDataType()
 
 	this.checkLink()
 }
@@ -63,10 +62,10 @@ func (this *Request) checkMethod() {
 	switch this.Method {
 
 	case "GET", "POST", "HEAD", "DELETE", "PUT", "OPTION":
-		return
+		// do nothing
+	default:
+		this.Method = "GET" // set default value
 	}
-
-	this.Method = "GET" // set default value
 }
 func (this *Request) checkHeaders() {
 	// default data
@@ -88,10 +87,22 @@ func (this *Request) checkTimeout() {
 		this.Timeout = 15000
 	}
 }
+
 func (this *Request) checkContentType() {
 
-	if this.ContentType == "" {
-		this.ContentType = "application/x-www-form-urlencoded; charset=UTF-8" // set default value
+	t := strings.TrimSpace(strings.ToLower(this.ContentType)) // remove left and right space and make the string lower
+
+	switch t {
+
+	// supported content type
+	case "application/x-www-form-urlencoded",
+		"multipart/form-data",
+		"application/json":
+		this.ContentType = t
+
+	default:
+		this.ContentType = "application/x-www-form-urlencoded" // set default value to content type
+
 	}
 }
 
@@ -109,11 +120,28 @@ func (this *Request) checkLink() {
 	}
 }
 
-func (this *Request) open() {
+func (this *Request) checkDataType() {
 
-	if this.BeforeSend != nil {
-		this.BeforeSend(this)
+	var err error
+
+	this.DataType = strings.TrimSpace(strings.ToLower(this.DataType))
+
+	switch this.DataType {
+
+	case "json": // supported data type
+		// do noting
+	default:
+		this.DataType = ""
+
 	}
+
+	this.link, err = url.Parse(this.Url)
+	if err != nil {
+		panic(err)
+	}
+}
+
+func (this *Request) open() {
 
 	this.defaultParams() // check default value
 
@@ -123,34 +151,67 @@ func (this *Request) open() {
 
 	case "http":
 		if port == "" {
-			port = "80" // default http port
+			port = ":80" // default http port
+		} else {
+			port = ""
 		}
-		if this.connection, this.err = net.Dial("tcp", this.link.Host+":"+port); this.err != nil {
+
+		if this.connection, this.err = net.Dial("tcp", this.link.Host+port); this.err != nil {
 			panic(this.err)
 		}
 	case "https":
 		if port == "" {
-			port = "443" // default https port
+			port = ":443" // default https port
+		} else {
+			port = ""
 		}
-		if this.connection, this.err = tls.Dial("tcp", this.link.Host+":"+port, &tls.Config{
+
+		if this.connection, this.err = tls.Dial("tcp", this.link.Host+port, &tls.Config{
 			InsecureSkipVerify: true, // not verify certificate
 		}); this.err != nil {
 			panic(this.err)
 		}
 	case "test": // debugger
-		if this.connection, this.err = os.OpenFile(this.link.Host, os.O_CREATE|os.O_WRONLY, 777); this.err != nil {
+		if this.connection, this.err = os.OpenFile(MD5(this.link.Host), os.O_CREATE|os.O_RDWR, 777); this.err != nil {
 			panic(this.err)
 		}
 	}
 }
 
-func getBoundary() string {
+func (this *Request) getBoundary() string {
 
-	return "----WebKitFormBoundary" + base64.StdEncoding.EncodeToString([]byte(time.Now().Format("05:04:15 02-01")))[0:16]
+	return "----WebKitFormBoundary" + Base64_Encode(this.Url + "Go-Request/" + VERSION)[0:16]
 }
 
 func escape(s string) string {
 	return regexp.MustCompile("([\"\\\\])").ReplaceAllString(s, "\\$1")
+}
+
+func (this *Request) Write(data []byte) {
+
+	if _, err := this.connection.Write(data); err != nil {
+		panic(err)
+	}
+}
+
+func http_query(data interface{}) string {
+
+	s := ""
+
+	switch t := data.(type) {
+
+	case map[string]interface{}:
+		for k, v := range t {
+			s += "&" + url.QueryEscape(k) + "=" + url.QueryEscape(fmt.Sprint(v))
+		}
+	case map[string]string:
+		for k, v := range t {
+			s += "&" + url.QueryEscape(k) + "=" + url.QueryEscape(v)
+		}
+	default:
+		s = "&" // do noting
+	}
+	return s[1:]
 }
 
 func (this *Request) send() {
@@ -158,10 +219,10 @@ func (this *Request) send() {
 	if this.connection != nil {
 
 		fps := make(map[string]*os.File)
-		query := ""               // query data
-		requestHeader := ""       // http request header
-		boundary := getBoundary() // POST form data boundary
-		formDataBody := ""        // POST the data of form data
+		query := ""                    // query data
+		requestHeader := ""            // http request header
+		boundary := this.getBoundary() // POST form data boundary
+		formDataBody := ""             // POST the data of form data
 
 		if this.File != nil {
 
@@ -170,11 +231,47 @@ func (this *Request) send() {
 					panic(this.err)
 				}
 			}
-
 		}
 
-		if !regexp.MustCompile("(?i:multipart/form-data)").MatchString(this.ContentType) {
+		if "multipart/form-data" == this.ContentType {
 
+			if this.Method == "POST" {
+				this.Headers["content-type"] = "multipart/form-data; boundary=" + boundary
+
+				if this.Data != nil {
+
+					for k, i := range this.Data {
+						formDataBody += boundary + "\r\nContent-Disposition: form-data; name=\"" + escape(k) + "\"\r\n\r\n" + fmt.Sprint(i) + "\r\n"
+					}
+
+					this.contentLength = int64(len(formDataBody)) + 40 // 40 is last boundary and ending '--'
+				}
+
+				for k, fp := range fps {
+
+					this.contentLength += 138
+					this.contentLength += int64(len(escape(k)))
+					if stat, err := fp.Stat(); err == nil {
+						this.contentLength += stat.Size()
+						this.contentLength += int64(len(escape(fp.Name())))
+					} else {
+						panic(err)
+					}
+				}
+			}
+
+		} else if "application/json" == this.ContentType {
+
+			if this.Method == "POST" {
+
+				for k, fp := range fps {
+					this.Data[k] = fp.Name()
+				}
+				query = json_encode(this.Data)
+				this.contentLength = int64(len(query))
+			}
+
+		} else {
 			// file to query
 			for k, i := range fps {
 				query += "&" + url.QueryEscape(k) + "=" + url.QueryEscape(i.Name())
@@ -186,44 +283,23 @@ func (this *Request) send() {
 					query += "&" + url.QueryEscape(k) + "=" + url.QueryEscape(fmt.Sprint(i))
 				}
 			}
-		} else if this.Method == "POST" {
-			this.Headers["content-type"] = "multipart/form-data; boundary=" + boundary
 
-			if this.Data != nil {
+			if len(query) > 0 {
 
-				for k, i := range this.Data {
-					formDataBody += boundary + "\r\nContent-Disposition: form-data; name=\"" + escape(k) + "\"\r\n\r\n" + fmt.Sprint(i) + "\r\n"
-				}
+				query = query[1:] // remove first '&'
 
-				this.contentLength = int64(len(formDataBody)) + 40 // 40 is last boundary and ending '--'
-			}
-
-			for k, fp := range fps {
-
-				this.contentLength += 138
-				this.contentLength += int64(len(escape(k)))
-				if stat, err := fp.Stat(); err == nil {
-					this.contentLength += stat.Size()
-					this.contentLength += int64(len(escape(fp.Name())))
+				if this.Method != "POST" {
+					if this.link.RawQuery != "" {
+						this.link.RawQuery = this.link.Query().Encode() + "&" + query
+					} else {
+						this.link.RawQuery = query
+					}
 				} else {
-					panic(err)
+					this.Headers["content-type"] = this.ContentType
+					this.contentLength = int64(len(query))
 				}
 			}
-		}
 
-		// if not POST method request
-		if query != "" {
-			if this.Method != "POST" {
-
-				if this.link.RawQuery != "" {
-					this.link.RawQuery += query
-				} else {
-					this.link.RawQuery = query[1:]
-				}
-			} else {
-				this.Headers["content-type"] = this.ContentType
-				this.contentLength = int64(len(query[1:]))
-			}
 		}
 
 		this.Headers["content-length"] = fmt.Sprint(this.contentLength)
@@ -243,42 +319,32 @@ func (this *Request) send() {
 		requestHeader = fmt.Sprintf("%s %s HTTP/1.0\r\n%s\r\n", this.Method, this.link.RequestURI(), headers)
 
 		// send request header
-		if _, err := this.connection.Write([]byte(requestHeader)); err != nil {
-			panic(err)
-		}
+		this.Write([]byte(requestHeader))
 
 		// send request body
 		if this.Method == "POST" {
 			if query != "" {
 				// send query data
-				if _, err := this.connection.Write([]byte(query[1:])); err != nil {
-					panic(err)
-				}
+				this.Write([]byte(query))
 			} else if formDataBody != "" {
 				// send form data
-				if _, err := this.connection.Write([]byte(formDataBody)); err != nil {
-					panic(err)
-				}
+				this.Write([]byte(formDataBody))
+
 				// send file if have
 				for k, fp := range fps {
 
 					// send file info
-					if _, werr := this.connection.Write([]byte(boundary + "\r\nContent-Disposition: form-data; name=\"" + escape(k) + "\"; filename=\"" + escape(fp.Name()) + "\"\r\nContent-Type: application/octet-stream\r\n\r\n")); werr != nil {
-						panic(werr)
-					}
+					this.Write([]byte(boundary + "\r\nContent-Disposition: form-data; name=\"" + escape(k) + "\"; filename=\"" + escape(fp.Name()) + "\"\r\nContent-Type: application/octet-stream\r\n\r\n"))
 					// send file data
 					b := make([]byte, 1024)
 					for {
+
 						if rn, err := fp.Read(b); err != nil && err != io.EOF {
 							panic(err)
 						} else {
-							if _, werr := this.connection.Write(b[0:rn]); werr != nil {
-								panic(werr)
-							}
+							this.Write(b[0:rn])
 							if rn <= 0 {
-								if _, werr := this.connection.Write([]byte("\r\n")); werr != nil {
-									panic(werr)
-								}
+								this.Write([]byte("\r\n"))
 								break
 							}
 						}
@@ -286,9 +352,7 @@ func (this *Request) send() {
 				}
 
 				// send the end of the body
-				if _, err := this.connection.Write([]byte(boundary + "--")); err != nil {
-					panic(err)
-				}
+				this.Write([]byte(boundary + "--"))
 			}
 		}
 
@@ -297,10 +361,30 @@ func (this *Request) send() {
 	}
 }
 
-func (this *Request) read() *http.Response {
+func (this *Request) read() *Response {
 
 	if resp, err := http.ReadResponse(bufio.NewReader(this.connection), nil); err == nil {
-		return resp
+
+		switch this.DataType {
+
+		case "json":
+			var tmp bytes.Buffer
+			if _, err := tmp.ReadFrom(resp.Body); err != nil {
+				panic(err)
+			} else {
+				return &Response{
+					HttpResponse: resp,
+					Data:         json_decode(tmp.Bytes(), nil),
+				}
+			}
+
+		}
+
+		return &Response{
+			HttpResponse: resp,
+			Data:         nil,
+		}
+
 	} else {
 		panic(err)
 	}

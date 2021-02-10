@@ -6,15 +6,20 @@ import (
 	"time"
 )
 
-func TestNew(t *testing.T) {
+func TestGo(t *testing.T) {
 
-	res, err := New(&Request{
-		Url:    "https://www.baidu.com/",
+	res, err := Go(&Request{
+		Url:    "http://api.tansoz.cn/15.php",
 		Method: "GET",
 		Async:  true,
+		Data: map[string]interface{}{
+			"id": "65535",
+		},
+		DataType: "json",
 		//ContentType: "multipart/form-data",
+		//ContentType: "application/json",
 		Error: func(err error) {
-			fmt.Println("async", err)
+			fmt.Println("async err:", err)
 		},
 		Complete: func(res *Response) {
 			fmt.Println("async res:", res)

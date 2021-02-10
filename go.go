@@ -10,7 +10,7 @@ type Response struct {
 	Data         interface{}
 }
 
-func New(request *Request) (res *Response, err error) {
+func Go(request *Request) (res *Response, err error) {
 
 	if request.Async {
 
@@ -40,11 +40,12 @@ func New(request *Request) (res *Response, err error) {
 
 			resp := request.read()
 
+			if resp.Data != nil && request.Success != nil {
+				request.Success(resp)
+			}
+
 			if request.Complete != nil {
-				request.Complete(&Response{
-					HttpResponse: resp,
-					Data:         nil,
-				})
+				request.Complete(resp)
 			}
 
 		}()
@@ -69,11 +70,7 @@ func New(request *Request) (res *Response, err error) {
 		request.open()
 		request.send()
 
-		resp := request.read()
+		return request.read(), err
 
-		return &Response{
-			HttpResponse: resp,
-			Data:         nil,
-		}, err
 	}
 }
